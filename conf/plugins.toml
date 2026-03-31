@@ -341,6 +341,10 @@ tag = "query"
 # - "rate": Limits requests per time interval (like a token bucket)
 # type = "inflight"
 
+# Custom error message returned when limit is exceeded
+# If not set, the default message with limit details is used
+# message = "Rate limit exceeded"
+
 ###
 # Plugin IpRestriction Config
 ###

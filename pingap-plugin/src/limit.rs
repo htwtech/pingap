@@ -88,6 +88,10 @@ pub struct Limiter {
 
     /// The weight of current slot
     weight: f64,
+
+    /// Custom error message to return when limit is exceeded.
+    /// If empty, the default error message is used.
+    message: String,
 }
 
 /// Converts a plugin configuration into a Limiter instance
@@ -158,6 +162,7 @@ impl TryFrom<&PluginConf> for Limiter {
             rate,
             plugin_step: step,
             weight,
+            message: get_str_conf(value, "message"),
         };
 
         // Validate plugin step - limiting only makes sense during request or upstream phases
@@ -317,9 +322,14 @@ impl Plugin for Limiter {
         // Try to increment counter
         if let Err(e) = self.incr(session, ctx) {
             // If limit exceeded, return 429 Too Many Requests
+            let body = if self.message.is_empty() {
+                e.to_string()
+            } else {
+                self.message.clone()
+            };
             return Ok(RequestPluginResult::Respond(HttpResponse {
                 status: StatusCode::TOO_MANY_REQUESTS,
-                body: e.to_string().into(),
+                body: body.into(),
                 ..Default::default()
             }));
         }
