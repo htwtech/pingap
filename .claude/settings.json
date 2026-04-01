@@ -16,7 +16,9 @@
       "mcp__claude-flow__:*",
       "mcp__ruflo__swarm_init",
       "mcp__ruflo__agent_spawn",
-      "mcp__ruflo__task_complete"
+      "mcp__ruflo__task_complete",
+      "mcp__ruflo__guidance_recommend",
+      "mcp__ruflo__memory_store"
     ],
     "deny": [
       "Read(./.env)",

@@ -96,6 +96,8 @@ pub enum PluginCategory {
     AcceptEncoding,
     /// Traffic splitting
     TrafficSplitting,
+    /// Query parameter rewriting
+    QueryRewrite,
 }
 impl Serialize for PluginCategory {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

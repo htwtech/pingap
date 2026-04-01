@@ -150,6 +150,7 @@ mod key_auth;
 mod limit;
 mod mock;
 mod ping;
+mod query_rewrite;
 mod redirect;
 mod referer_restriction;
 mod request_id;
