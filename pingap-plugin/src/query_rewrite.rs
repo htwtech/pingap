@@ -15,7 +15,7 @@
 use super::{Error, get_hash_key, get_plugin_factory, get_str_conf};
 use async_trait::async_trait;
 use ctor::ctor;
-use pingap_config::{PluginCategory, PluginConf};
+use pingap_config::PluginConf;
 use pingap_core::{Ctx, Plugin, PluginStep, RequestPluginResult};
 use pingora::proxy::Session;
 use std::borrow::Cow;
