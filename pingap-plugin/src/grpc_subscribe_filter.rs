@@ -608,12 +608,13 @@ impl Plugin for GrpcSubscribeFilter {
 
         let path = session.req_header().uri.path();
         if path == SUBSCRIBE_PATH {
-            // Store client IP for body filter to use
+            // Ensure client IP is resolved, then copy it for add_variable
             let ip = ctx
                 .conn
                 .client_ip
-                .get_or_insert_with(|| get_client_ip(session));
-            ctx.add_variable("grpc_subscribe_ip", ip);
+                .get_or_insert_with(|| get_client_ip(session))
+                .clone();
+            ctx.add_variable("grpc_subscribe_ip", &ip);
         }
 
         Ok(RequestPluginResult::Continue)
