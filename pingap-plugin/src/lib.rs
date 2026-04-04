@@ -144,6 +144,7 @@ mod compression;
 mod cors;
 mod csrf;
 mod directory;
+mod grpc_subscribe_filter;
 mod ip_restriction;
 mod jwt;
 mod key_auth;

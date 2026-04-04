@@ -900,6 +900,46 @@ impl Server {
     }
 
     #[inline]
+    pub fn handle_request_body_plugin(
+        &self,
+        session: &mut Session,
+        ctx: &mut Ctx,
+        body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> pingora::Result<Option<pingap_core::HttpResponse>> {
+        let plugins = match ctx.plugins.take() {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        if plugins.is_empty() {
+            ctx.plugins = Some(plugins);
+            return Ok(None);
+        }
+
+        let result = {
+            let mut resp = None;
+            for (name, plugin) in plugins.iter() {
+                let now = Instant::now();
+                if let Some(r) =
+                    plugin.handle_request_body(session, ctx, body, end_of_stream)?
+                {
+                    let elapsed = now.elapsed().as_millis() as u32;
+                    debug!(
+                        target: LOG_TARGET,
+                        name, elapsed, "request body plugin rejected"
+                    );
+                    ctx.add_plugin_processing_time(name, elapsed);
+                    resp = Some(r);
+                    break;
+                }
+            }
+            Ok(resp)
+        };
+        ctx.plugins = Some(plugins);
+        result
+    }
+
+    #[inline]
     pub fn handle_response_body_plugin(
         &self,
         session: &mut Session,
@@ -1304,9 +1344,9 @@ impl ProxyHttp for Server {
     /// Tracks payload size and enforces size limits.
     async fn request_body_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         body: &mut Option<Bytes>,
-        _end_of_stream: bool,
+        end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<()>
     where
@@ -1325,6 +1365,14 @@ impl ProxyHttp for Server {
                     ));
                 }
             }
+        }
+        if let Some(resp) =
+            self.handle_request_body_plugin(session, ctx, body, end_of_stream)?
+        {
+            return Err(new_internal_error(
+                resp.status.as_u16(),
+                resp.body.to_str_lossy().to_string(),
+            ));
         }
         Ok(())
     }
