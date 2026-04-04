@@ -18,8 +18,10 @@ Yellowstone gRPC позволяет клиентам подписываться 
 ### Новые файлы
 | Файл | Описание |
 |------|----------|
-| `pingap-plugin/src/grpc_subscribe_filter.rs` | Плагин: конфигурация, protobuf парсер, валидация |
-| `conf/grpc-subscribe-filter.toml` | Пример конфигурации с комментариями |
+| `pingap-plugin/src/grpc_subscribe_filter.rs` | Плагин: per-IP правила, protobuf парсер, валидация |
+| `conf/grpc-subscribe-filter.toml` | Конфигурация плагина (rules_dir) |
+| `conf/grpc-filters/default.toml` | Правила по умолчанию |
+| `conf/grpc-filters/<IP>.toml` | Per-IP правила (создаются вручную) |
 
 ### Изменённые файлы
 | Файл | Что изменено |
@@ -49,36 +51,49 @@ fn handle_request_body(
 Это даёт: ноль внешних зависимостей, быстрый парсинг, но хрупкость при изменении proto.
 
 ### 3. Двухфазная обработка
-1. `handle_request` (step=Request) — проверяет path == `/geyser.Geyser/Subscribe`, ставит флаг в ctx
-2. `handle_request_body` — если флаг стоит, парсит gRPC frame и валидирует
+1. `handle_request` (step=Request) — проверяет path == `/geyser.Geyser/Subscribe`, сохраняет client IP в ctx
+2. `handle_request_body` — если флаг стоит, получает per-IP правила, парсит gRPC frame и валидирует
+
+### 4. Per-IP правила из файлов
+Правила загружаются из TOML файлов в `rules_dir`:
+- `default.toml` — применяются когда для IP нет отдельного файла
+- `<IP>.toml` — правила для конкретного IP (e.g. `192.168.1.10.toml`)
+- Перечитываются каждые `reload_interval` (default: 30s) без перезапуска
+- Для добавления/изменения правил — создать/отредактировать файл, плагин подхватит при следующем reload
 
 ## Конфигурация
 
+### Плагин (conf/grpc-subscribe-filter.toml)
 ```toml
 [plugins.grpcSubscribeFilter]
 category = "grpc_subscribe_filter"
+rules_dir = "conf/grpc-filters"    # директория с per-IP правилами
+reload_interval = "30s"             # интервал перечитывания
+```
 
-[plugins.grpcSubscribeFilter.accounts]
+### Per-IP файл (conf/grpc-filters/192.168.1.10.toml)
+```toml
+[accounts]
 account_max = 40
 owner_max = 200
 data_slice_max = 3
 account_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
 owner_reject = ["11111111111111111111111111111111"]
 
-[plugins.grpcSubscribeFilter.transactions]
+[transactions]
 account_include_max = 30
 account_exclude_max = 20
 account_required_max = 40
 account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
 
-[plugins.grpcSubscribeFilter.blocks]
+[blocks]
 account_include_max = 500
 include_accounts = false
 include_entries = false
 include_transactions = true
 account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
 
-[plugins.grpcSubscribeFilter.transactions_status]
+[transactions_status]
 account_include_max = 200
 account_exclude_max = 20
 account_required_max = 200

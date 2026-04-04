@@ -1,0 +1,28 @@
+# Default rules for all clients without a per-IP config file.
+# To add per-IP rules, create a file named <IP>.toml in this directory.
+
+[accounts]
+account_max = 100
+owner_max = 20
+data_slice_max = 2
+account_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
+owner_reject = ["11111111111111111111111111111111"]
+
+[transactions]
+account_include_max = 100
+account_exclude_max = 100
+account_required_max = 100
+account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
+
+[blocks]
+account_include_max = 20
+include_accounts = false
+include_entries = false
+include_transactions = true
+account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
+
+[transactions_status]
+account_include_max = 20
+account_exclude_max = 20
+account_required_max = 20
+account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]

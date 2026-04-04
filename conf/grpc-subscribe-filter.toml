@@ -1,33 +1,13 @@
 ###
 # Plugin GrpcSubscribeFilter Config
 ###
-# Validates Yellowstone gRPC SubscribeRequest filters against configured limits.
-# Rejects subscribe requests that exceed account/owner/filter limits.
+# Validates Yellowstone gRPC SubscribeRequest filters against per-IP limits.
+# Rules are loaded from TOML files in rules_dir.
 [plugins.grpcSubscribeFilter]
 category = "grpc_subscribe_filter"
 
-[plugins.grpcSubscribeFilter.accounts]
-account_max = 40
-owner_max = 200
-data_slice_max = 3
-account_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
-owner_reject = ["11111111111111111111111111111111"]
+# Directory with per-IP rule files (default.toml + <IP>.toml)
+rules_dir = "conf/grpc-filters"
 
-[plugins.grpcSubscribeFilter.transactions]
-account_include_max = 30
-account_exclude_max = 20
-account_required_max = 40
-account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
-
-[plugins.grpcSubscribeFilter.blocks]
-account_include_max = 500
-include_accounts = false
-include_entries = false
-include_transactions = true
-account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
-
-[plugins.grpcSubscribeFilter.transactions_status]
-account_include_max = 200
-account_exclude_max = 20
-account_required_max = 200
-account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
+# How often to reload rules from disk (default: 30s)
+reload_interval = "30s"
