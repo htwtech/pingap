@@ -18,7 +18,8 @@ use ctor::ctor;
 use http::StatusCode;
 use pingap_config::PluginConf;
 use pingap_core::{
-    Ctx, HttpResponse, Plugin, PluginStep, RequestPluginResult, get_client_ip,
+    Ctx, HttpResponse, Inflight, Plugin, PluginStep, RequestPluginResult,
+    get_client_ip,
 };
 use pingora::proxy::Session;
 use std::borrow::Cow;
@@ -106,6 +107,7 @@ struct BlocksLimits {
 
 #[derive(Debug, Clone)]
 struct FilterRules {
+    max_connections: i64,
     accounts: AccountsLimits,
     transactions: TransactionsLimits,
     blocks: BlocksLimits,
@@ -119,7 +121,13 @@ impl FilterRules {
         let blk = get_sub_table(conf, "blocks");
         let tx_st = get_sub_table(conf, "transactions_status");
 
+        let max_conn = conf
+            .get("max_connections")
+            .and_then(|v| v.as_integer())
+            .unwrap_or(0); // 0 = unlimited
+
         Self {
+            max_connections: max_conn,
             accounts: AccountsLimits {
                 account_max: sub_int(acc, "account_max", 100),
                 owner_max: sub_int(acc, "owner_max", 20),
@@ -210,6 +218,8 @@ pub struct GrpcSubscribeFilter {
     rules_dir: Option<PathBuf>,
     reload_interval: Duration,
     last_reload: AtomicU64,
+    /// Inflight connection counter per IP
+    inflight: Inflight,
 }
 
 impl GrpcSubscribeFilter {
@@ -301,6 +311,7 @@ impl TryFrom<&PluginConf> for GrpcSubscribeFilter {
             rules_dir,
             reload_interval: reload_secs,
             last_reload: AtomicU64::new(now_secs()),
+            inflight: Inflight::new(),
         })
     }
 }
@@ -530,6 +541,44 @@ impl Plugin for GrpcSubscribeFilter {
                 .client_ip
                 .get_or_insert_with(|| get_client_ip(session))
                 .clone();
+
+            // Lazy reload rules
+            self.maybe_reload();
+
+            // Check if IP has rules configured
+            let Some(rules) = self.get_rules_for_ip(&ip) else {
+                tracing::warn!(client_ip = ip.as_str(), "no rules configured, rejecting");
+                return Ok(RequestPluginResult::Respond(HttpResponse {
+                    status: StatusCode::FORBIDDEN,
+                    body: format!("no subscription rules configured for {ip}").into(),
+                    ..Default::default()
+                }));
+            };
+
+            // Check inflight connection limit
+            if rules.max_connections > 0 {
+                let (guard, current) = self.inflight.incr(&ip, 1);
+                if current as i64 > rules.max_connections {
+                    tracing::warn!(
+                        client_ip = ip.as_str(),
+                        current,
+                        max = rules.max_connections,
+                        "too many concurrent connections"
+                    );
+                    return Ok(RequestPluginResult::Respond(HttpResponse {
+                        status: StatusCode::TOO_MANY_REQUESTS,
+                        body: format!(
+                            "too many concurrent connections ({current} > {})",
+                            rules.max_connections
+                        )
+                        .into(),
+                        ..Default::default()
+                    }));
+                }
+                // Guard auto-decrements when request ends
+                ctx.state.guard = Some(guard);
+            }
+
             ctx.add_variable("grpc_subscribe_ip", &ip);
         }
 
@@ -563,17 +612,9 @@ impl Plugin for GrpcSubscribeFilter {
             return Ok(None);
         }
 
-        // Lazy reload per-IP rules from disk
-        self.maybe_reload();
-
-        // No config file for this IP → reject
+        // Rules already validated in handle_request; get them for body validation
         let Some(rules) = self.get_rules_for_ip(&ip) else {
-            tracing::warn!(client_ip = ip.as_str(), "no rules configured, rejecting");
-            return Ok(Some(HttpResponse {
-                status: StatusCode::FORBIDDEN,
-                body: format!("no subscription rules configured for {ip}").into(),
-                ..Default::default()
-            }));
+            return Ok(None); // Should not happen — already rejected in handle_request
         };
 
         let proto_buf = &buf[5..];
