@@ -182,6 +182,33 @@ pub trait Plugin: Sync + Send {
         Ok(ResponseBodyPluginResult::Unchanged)
     }
 
+    /// Processes an HTTP request body chunk at a specified lifecycle step.
+    ///
+    /// Called for each chunk of the request body before it is sent upstream.
+    /// This allows plugins to inspect or reject requests based on body content
+    /// (e.g., validating gRPC protobuf payloads).
+    ///
+    /// # Parameters
+    /// * `_session` - Mutable reference to the HTTP session
+    /// * `_ctx` - Mutable reference to the request context
+    /// * `_body` - Mutable reference to the request body chunk
+    /// * `_end_of_stream` - Boolean flag indicating if this is the final chunk
+    ///
+    /// # Returns
+    /// * `Ok(None)` - Allow the request to continue
+    /// * `Ok(Some(response))` - Reject the request and return this response
+    /// * `Err` - Returns error if plugin processing failed
+    #[inline]
+    fn handle_request_body(
+        &self,
+        _session: &mut Session,
+        _ctx: &mut Ctx,
+        _body: &mut Option<bytes::Bytes>,
+        _end_of_stream: bool,
+    ) -> pingora::Result<Option<HttpResponse>> {
+        Ok(None)
+    }
+
     /// Processes an upstream response at a specified lifecycle step.
     ///
     /// # Parameters

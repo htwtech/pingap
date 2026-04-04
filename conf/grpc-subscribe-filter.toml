@@ -1,0 +1,15 @@
+###
+# Plugin GrpcSubscribeFilter Config
+###
+# Validates Yellowstone gRPC SubscribeRequest filters against per-IP limits.
+# Rules are loaded from TOML files in rules_dir.
+[plugins.grpcSubscribeFilter]
+category = "grpc_subscribe_filter"
+
+# Directory with per-IP rule files (default.toml + <IP>.toml)
+# IMPORTANT: must be OUTSIDE the pingap conf/ directory,
+# otherwise pingap will try to parse these files as its own config.
+rules_dir = "grpc-filters"
+
+# How often to reload rules from disk (default: 30s)
+reload_interval = "30s"
