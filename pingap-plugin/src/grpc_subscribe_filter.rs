@@ -112,6 +112,8 @@ struct FilterRules {
     transactions: TransactionsLimits,
     blocks: BlocksLimits,
     transactions_status: TransactionsLimits,
+    blocks_meta_max: i64,
+    entry_max: i64,
 }
 
 impl FilterRules {
@@ -154,6 +156,12 @@ impl FilterRules {
                 account_required_max: sub_int(tx_st, "account_required_max", 20),
                 account_include_reject: sub_str_slice(tx_st, "account_include_reject"),
             },
+            blocks_meta_max: get_sub_table(conf, "blocks_meta")
+                .map(|t| sub_int(Some(t), "max", 0))
+                .unwrap_or(0),
+            entry_max: get_sub_table(conf, "entry")
+                .map(|t| sub_int(Some(t), "max", 0))
+                .unwrap_or(0),
         }
     }
 }
@@ -422,7 +430,9 @@ fn validate_subscribe_request(rules: &FilterRules, proto_buf: &[u8]) -> std::res
     validate_accounts(rules, proto_buf)?;
     validate_tx_filters(proto_buf, 3, &rules.transactions, "transactions")?;
     validate_blocks(rules, proto_buf)?;
+    validate_map_count(proto_buf, 5, rules.blocks_meta_max, "blocks_meta")?;
     validate_tx_filters(proto_buf, 10, &rules.transactions_status, "transactions_status")?;
+    validate_map_count(proto_buf, 8, rules.entry_max, "entry")?;
     validate_data_slices(rules, proto_buf)?;
     Ok(())
 }
@@ -500,6 +510,18 @@ fn validate_blocks(rules: &FilterRules, proto_buf: &[u8]) -> std::result::Result
                 return Err("blocks filter: include_entries is not allowed".to_string());
             }
         }
+    }
+    Ok(())
+}
+
+/// Validate the number of entries in a map field (for blocks_meta, entry)
+fn validate_map_count(proto_buf: &[u8], map_field: u32, max: i64, label: &str) -> std::result::Result<(), String> {
+    if max <= 0 {
+        return Ok(()); // 0 = unlimited
+    }
+    let count = extract_len_fields(proto_buf, map_field).len();
+    if count as i64 > max {
+        return Err(format!("{label}: too many filters ({count} > {max})"));
     }
     Ok(())
 }
