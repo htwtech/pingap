@@ -4,60 +4,30 @@
 # Validates Yellowstone gRPC SubscribeRequest filters against configured limits.
 # Rejects subscribe requests that exceed account/owner/filter limits.
 [plugins.grpcSubscribeFilter]
-# Plugin type
 category = "grpc_subscribe_filter"
 
-# Base RPS used for default limit calculations
-# account_max defaults to rps, owner_max defaults to rps/5, etc.
-rps = 100
+[plugins.grpcSubscribeFilter.accounts]
+account_max = 40
+owner_max = 200
+data_slice_max = 3
+account_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
+owner_reject = ["11111111111111111111111111111111"]
 
-# --- Accounts filter limits ---
-# Maximum number of accounts per subscribe filter (default: rps)
-# accounts_account_max = 100
+[plugins.grpcSubscribeFilter.transactions]
+account_include_max = 30
+account_exclude_max = 20
+account_required_max = 40
+account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
 
-# Maximum number of owners per subscribe filter (default: rps / 5)
-# accounts_owner_max = 20
+[plugins.grpcSubscribeFilter.blocks]
+account_include_max = 500
+include_accounts = false
+include_entries = false
+include_transactions = true
+account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
 
-# Maximum number of accounts_data_slice entries (default: 2)
-# accounts_data_slice_max = 2
-
-# Accounts that are not allowed in account filters
-accounts_account_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
-
-# Owners that are not allowed in owner filters
-accounts_owner_reject = ["11111111111111111111111111111111"]
-
-# --- Transactions filter limits ---
-# Maximum number of account_include per transaction filter (default: rps)
-# tx_account_include_max = 100
-
-# Maximum number of account_exclude per transaction filter (default: rps)
-# tx_account_exclude_max = 100
-
-# Maximum number of account_required per transaction filter (default: rps)
-# tx_account_required_max = 100
-
-# Accounts not allowed in account_include for transactions
-tx_account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
-
-# --- Blocks filter limits ---
-# Maximum number of account_include per block filter (default: rps / 5)
-# blocks_account_include_max = 20
-
-# Whether include_accounts is allowed in block filters
-blocks_include_accounts = false
-
-# Whether include_entries is allowed in block filters
-blocks_include_entries = false
-
-# Whether include_transactions is allowed in block filters
-blocks_include_transactions = true
-
-# Accounts not allowed in account_include for blocks
-blocks_account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
-
-# --- Transactions status filter limits (default: rps / 5) ---
-# tx_status_account_include_max = 20
-# tx_status_account_exclude_max = 20
-# tx_status_account_required_max = 20
-tx_status_account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
+[plugins.grpcSubscribeFilter.transactions_status]
+account_include_max = 200
+account_exclude_max = 20
+account_required_max = 200
+account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]

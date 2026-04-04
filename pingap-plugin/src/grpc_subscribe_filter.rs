@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{
-    Error, get_bool_conf, get_hash_key, get_int_conf_or_default,
-    get_plugin_factory, get_str_slice_conf,
-};
+use super::{Error, get_hash_key, get_plugin_factory};
 use async_trait::async_trait;
 use ctor::ctor;
 use http::StatusCode;
@@ -25,9 +22,49 @@ use pingora::proxy::Session;
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Arc;
+use toml::Value;
 use tracing::debug;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
+
+// ──────────────────────────────────────────────────────────────
+// TOML sub-table helpers
+// ─────────────────────────────────────────────────────��────────
+
+/// Get a nested table from the config
+fn get_sub_table<'a>(conf: &'a PluginConf, key: &str) -> Option<&'a toml::map::Map<String, Value>> {
+    conf.get(key).and_then(|v| v.as_table())
+}
+
+/// Read an i64 from a sub-table with a default
+fn sub_int(table: Option<&toml::map::Map<String, Value>>, key: &str, default: i64) -> i64 {
+    table
+        .and_then(|t| t.get(key))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(default)
+}
+
+/// Read a bool from a sub-table with a default
+fn sub_bool(table: Option<&toml::map::Map<String, Value>>, key: &str, default: bool) -> bool {
+    table
+        .and_then(|t| t.get(key))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default)
+}
+
+/// Read a string array from a sub-table
+fn sub_str_slice(table: Option<&toml::map::Map<String, Value>>, key: &str) -> HashSet<String> {
+    table
+        .and_then(|t| t.get(key))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 // gRPC Subscribe path for Yellowstone/Geyser
 const SUBSCRIBE_PATH: &str = "/geyser.Geyser/Subscribe";
@@ -82,86 +119,39 @@ impl TryFrom<&PluginConf> for GrpcSubscribeFilter {
     type Error = Error;
     fn try_from(conf: &PluginConf) -> Result<Self> {
         let hash_value = get_hash_key(conf);
-        let rps = get_int_conf_or_default(conf, "rps", 100);
 
+        let acc = get_sub_table(conf, "accounts");
         let accounts = AccountsLimits {
-            account_max: get_int_conf_or_default(conf, "accounts_account_max", rps),
-            owner_max: get_int_conf_or_default(conf, "accounts_owner_max", rps / 5),
-            data_slice_max: get_int_conf_or_default(conf, "accounts_data_slice_max", 2),
-            account_reject: get_str_slice_conf(conf, "accounts_account_reject")
-                .into_iter()
-                .collect(),
-            owner_reject: get_str_slice_conf(conf, "accounts_owner_reject")
-                .into_iter()
-                .collect(),
+            account_max: sub_int(acc, "account_max", 100),
+            owner_max: sub_int(acc, "owner_max", 20),
+            data_slice_max: sub_int(acc, "data_slice_max", 2),
+            account_reject: sub_str_slice(acc, "account_reject"),
+            owner_reject: sub_str_slice(acc, "owner_reject"),
         };
 
+        let tx = get_sub_table(conf, "transactions");
         let transactions = TransactionsLimits {
-            account_include_max: get_int_conf_or_default(
-                conf,
-                "tx_account_include_max",
-                rps,
-            ),
-            account_exclude_max: get_int_conf_or_default(
-                conf,
-                "tx_account_exclude_max",
-                rps,
-            ),
-            account_required_max: get_int_conf_or_default(
-                conf,
-                "tx_account_required_max",
-                rps,
-            ),
-            account_include_reject: get_str_slice_conf(
-                conf,
-                "tx_account_include_reject",
-            )
-            .into_iter()
-            .collect(),
+            account_include_max: sub_int(tx, "account_include_max", 100),
+            account_exclude_max: sub_int(tx, "account_exclude_max", 100),
+            account_required_max: sub_int(tx, "account_required_max", 100),
+            account_include_reject: sub_str_slice(tx, "account_include_reject"),
         };
 
+        let blk = get_sub_table(conf, "blocks");
         let blocks = BlocksLimits {
-            account_include_max: get_int_conf_or_default(
-                conf,
-                "blocks_account_include_max",
-                rps / 5,
-            ),
-            include_accounts: get_bool_conf(conf, "blocks_include_accounts"),
-            include_entries: get_bool_conf(conf, "blocks_include_entries"),
-            include_transactions: conf
-                .get("blocks_include_transactions")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
-            account_include_reject: get_str_slice_conf(
-                conf,
-                "blocks_account_include_reject",
-            )
-            .into_iter()
-            .collect(),
+            account_include_max: sub_int(blk, "account_include_max", 20),
+            include_accounts: sub_bool(blk, "include_accounts", false),
+            include_entries: sub_bool(blk, "include_entries", false),
+            include_transactions: sub_bool(blk, "include_transactions", true),
+            account_include_reject: sub_str_slice(blk, "account_include_reject"),
         };
 
+        let tx_st = get_sub_table(conf, "transactions_status");
         let transactions_status = TransactionsLimits {
-            account_include_max: get_int_conf_or_default(
-                conf,
-                "tx_status_account_include_max",
-                rps / 5,
-            ),
-            account_exclude_max: get_int_conf_or_default(
-                conf,
-                "tx_status_account_exclude_max",
-                rps / 5,
-            ),
-            account_required_max: get_int_conf_or_default(
-                conf,
-                "tx_status_account_required_max",
-                rps / 5,
-            ),
-            account_include_reject: get_str_slice_conf(
-                conf,
-                "tx_status_account_include_reject",
-            )
-            .into_iter()
-            .collect(),
+            account_include_max: sub_int(tx_st, "account_include_max", 20),
+            account_exclude_max: sub_int(tx_st, "account_exclude_max", 20),
+            account_required_max: sub_int(tx_st, "account_required_max", 20),
+            account_include_reject: sub_str_slice(tx_st, "account_include_reject"),
         };
 
         Ok(Self {
@@ -584,23 +574,58 @@ mod tests {
     fn default_conf() -> PluginConf {
         toml::from_str::<PluginConf>(
             r#"
-rps = 100
-accounts_account_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
-accounts_owner_reject = ["11111111111111111111111111111111"]
-tx_account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
-blocks_account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
-blocks_include_accounts = false
-blocks_include_entries = false
-blocks_include_transactions = true
+[accounts]
+account_max = 40
+owner_max = 200
+data_slice_max = 3
+account_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
+owner_reject = ["11111111111111111111111111111111"]
+
+[transactions]
+account_include_max = 30
+account_exclude_max = 20
+account_required_max = 40
+account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
+
+[blocks]
+account_include_max = 500
+include_accounts = false
+include_entries = false
+include_transactions = true
+account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
+
+[transactions_status]
+account_include_max = 200
+account_exclude_max = 20
+account_required_max = 200
+account_include_reject = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]
 "#,
         )
         .expect("valid toml")
     }
 
     #[test]
-    fn test_config_defaults() {
+    fn test_config_nested() {
         let filter =
             GrpcSubscribeFilter::try_from(&default_conf()).expect("should parse");
+        assert_eq!(40, filter.accounts.account_max);
+        assert_eq!(200, filter.accounts.owner_max);
+        assert_eq!(3, filter.accounts.data_slice_max);
+        assert_eq!(30, filter.transactions.account_include_max);
+        assert_eq!(20, filter.transactions.account_exclude_max);
+        assert_eq!(40, filter.transactions.account_required_max);
+        assert_eq!(500, filter.blocks.account_include_max);
+        assert_eq!(false, filter.blocks.include_accounts);
+        assert_eq!(true, filter.blocks.include_transactions);
+        assert_eq!(200, filter.transactions_status.account_include_max);
+        assert_eq!(20, filter.transactions_status.account_exclude_max);
+    }
+
+    #[test]
+    fn test_config_defaults_when_empty() {
+        let conf = toml::from_str::<PluginConf>("").expect("valid toml");
+        let filter = GrpcSubscribeFilter::try_from(&conf).expect("should parse");
+        // All defaults
         assert_eq!(100, filter.accounts.account_max);
         assert_eq!(20, filter.accounts.owner_max);
         assert_eq!(2, filter.accounts.data_slice_max);
@@ -704,8 +729,8 @@ blocks_include_transactions = true
     fn test_validate_data_slices_exceeded() {
         let conf = toml::from_str::<PluginConf>(
             r#"
-rps = 100
-accounts_data_slice_max = 1
+[accounts]
+data_slice_max = 1
 "#,
         )
         .expect("valid toml");
