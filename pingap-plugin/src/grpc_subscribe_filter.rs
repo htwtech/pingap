@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{
-    Error, get_bool_conf, get_hash_key, get_int_conf, get_int_conf_or_default,
+    Error, get_bool_conf, get_hash_key, get_int_conf_or_default,
     get_plugin_factory, get_str_slice_conf,
 };
 use async_trait::async_trait;
