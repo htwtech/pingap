@@ -762,16 +762,14 @@ interval = "1s"
     }
 
     fn expect_continue(result: RequestPluginResult) {
-        assert_eq!(
-            true,
-            result == RequestPluginResult::Continue,
-            "expected Continue, got {result:?}"
-        );
+        // `RequestPluginResult` does not implement Debug, so use the same
+        // `assert_eq!(true, <bool>)` trick as the existing tests in this file.
+        assert_eq!(true, result == RequestPluginResult::Continue);
     }
 
     fn expect_429(result: RequestPluginResult) {
         let RequestPluginResult::Respond(resp) = result else {
-            panic!("expected Respond(429), got {result:?}");
+            panic!("expected Respond(429), got Continue");
         };
         assert_eq!(StatusCode::TOO_MANY_REQUESTS, resp.status);
     }
