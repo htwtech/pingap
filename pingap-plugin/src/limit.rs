@@ -18,6 +18,7 @@ use super::{
 };
 use async_trait::async_trait;
 use ctor::ctor;
+use dashmap::DashMap;
 use http::StatusCode;
 use humantime::parse_duration;
 use pingap_config::{PluginCategory, PluginConf};
@@ -29,8 +30,9 @@ use pingap_core::{
 };
 use pingora::proxy::Session;
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -47,7 +49,9 @@ pub enum LimitTag {
 // Limiter implements rate limiting and concurrent request limiting
 // It can be configured via TOML with settings like:
 // ```toml
-// type = "rate"          # or "inflight"
+// type = "rate"          # sliding window estimate (legacy, allows burst up to 2*max)
+// # or "strict_rate"     # sliding window log (strict, counts rejected too)
+// # or "inflight"        # concurrent request limit
 // tag = "cookie"         # or "header", "query", "ip"
 // key = "session_id"     # name of header/cookie/query param to use
 // max = 100             # maximum requests allowed
@@ -77,6 +81,13 @@ pub struct Limiter {
     /// Only used when configured as a rate limiter (type = "rate")
     rate: Option<Rate>,
 
+    /// Strict sliding-window-log limiter: stores actual timestamps of attempts
+    /// (both accepted AND rejected) in a ring buffer of size `max`.
+    /// Guarantees no burst above `max` in any `interval`, and the window
+    /// follows the spammer — cooldown resets only after `interval` of silence.
+    /// Only used when configured as a strict rate limiter (type = "strict_rate")
+    strict_rate: Option<Arc<StrictRate>>,
+
     /// When to apply the limiting logic:
     /// - PluginStep::Request: During initial request processing
     /// - PluginStep::ProxyUpstream: Before forwarding to upstream server
@@ -92,6 +103,74 @@ pub struct Limiter {
     /// Custom error message to return when limit is exceeded.
     /// If empty, the default error message is used.
     message: String,
+}
+
+/// Strict sliding-window-log rate limiter.
+///
+/// Per-key ring buffer of `Instant` timestamps of size `max`. On each request:
+/// 1. Evict timestamps older than `now - interval` from the front.
+/// 2. If the buffer is full (>= max fresh entries), evict the oldest and
+///    push `now`, then return `false` (reject). This "shifts the window forward"
+///    while the client keeps spamming — exactly the desired behaviour for
+///    hostile bursts.
+/// 3. Otherwise push `now` and return `true` (accept).
+///
+/// Unlike `pingora_limits::Rate`, this is **not** an estimate: the buffer holds
+/// actual event timestamps, so the guarantee "no more than `max` events within
+/// any sliding window of `interval`" is exact.
+struct StrictRate {
+    /// Maximum number of events (accepted + rejected) allowed in `interval`.
+    max: usize,
+
+    /// Length of the sliding window.
+    interval: Duration,
+
+    /// Per-key timestamp rings. VecDeque is kept at capacity `max` — enough
+    /// to decide "is the window saturated?".
+    buckets: DashMap<String, VecDeque<Instant>>,
+}
+
+impl StrictRate {
+    /// Returns `true` if the request should be accepted (slot reserved),
+    /// `false` if it must be rejected.
+    ///
+    /// Regardless of the return value, the attempt is recorded in the bucket
+    /// (ring-buffer-style) — this is how rejected spam continues to "push"
+    /// the window forward and prevents the spammer from escaping the limit
+    /// until it goes silent for a full `interval`.
+    fn try_acquire(&self, key: &str) -> bool {
+        // `entry(...).or_insert_with(...)` atomically either grabs the existing
+        // bucket (taking a write lock on the shard) or inserts a fresh empty
+        // deque. The returned `RefMut` holds the shard lock until dropped, so
+        // the mutations below are race-free.
+        let mut bucket =
+            self.buckets.entry(key.to_string()).or_insert_with(|| {
+                VecDeque::with_capacity(self.max.max(1))
+            });
+
+        let now = Instant::now();
+        let cutoff = now.checked_sub(self.interval).unwrap_or(now);
+
+        // 1. Drop timestamps that have fallen out of the sliding window.
+        while let Some(&front) = bucket.front() {
+            if front <= cutoff {
+                bucket.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // 2. Saturated? — reject, but still shift the window forward.
+        if bucket.len() >= self.max {
+            bucket.pop_front();
+            bucket.push_back(now);
+            return false;
+        }
+
+        // 3. Has room — accept.
+        bucket.push_back(now);
+        true
+    }
 }
 
 /// Converts a plugin configuration into a Limiter instance
@@ -135,18 +214,37 @@ impl TryFrom<&PluginConf> for Limiter {
             Duration::from_secs(10)
         };
 
-        // Create either inflight or rate limiter based on config
+        // Create inflight / rate / strict_rate limiter based on `type`
         let mut inflight = None;
         let mut rate = None;
-        let mut max = get_int_conf(value, "max") as f64;
-        if get_str_conf(value, "type") == "inflight" {
-            // Inflight limiter uses atomic counters to track concurrent requests
-            inflight = Some(Inflight::new());
-        } else {
-            // convert it to rps
-            max /= interval.as_secs_f64().max(1.0);
-            // Rate limiter uses time-bucketed counters
-            rate = Some(Rate::new(interval));
+        let mut strict_rate = None;
+        let raw_max = get_int_conf(value, "max");
+        let mut max = raw_max as f64;
+        match get_str_conf(value, "type").as_str() {
+            "inflight" => {
+                // Inflight limiter uses atomic counters to track concurrent requests
+                inflight = Some(Inflight::new());
+            },
+            "strict_rate" => {
+                // Strict sliding-window-log limiter:
+                // `max` is consumed as-is (NOT divided by interval) — it is
+                // a literal count of events allowed inside the sliding window.
+                let strict_max = raw_max.max(1) as usize;
+                strict_rate = Some(Arc::new(StrictRate {
+                    max: strict_max,
+                    interval,
+                    buckets: DashMap::new(),
+                }));
+                // keep `max` populated with the raw count so that error
+                // reporting and unit tests can inspect it consistently
+                max = strict_max as f64;
+            },
+            _ => {
+                // convert it to rps
+                max /= interval.as_secs_f64().max(1.0);
+                // Rate limiter uses time-bucketed counters
+                rate = Some(Rate::new(interval));
+            },
         }
 
         let weight = get_int_conf_or_default(value, "weight", 50).clamp(0, 100)
@@ -160,6 +258,7 @@ impl TryFrom<&PluginConf> for Limiter {
             max,
             inflight,
             rate,
+            strict_rate,
             plugin_step: step,
             weight,
             message: get_str_conf(value, "message"),
@@ -245,6 +344,20 @@ impl Limiter {
 
         // Skip limiting if no key found (e.g., missing header/cookie)
         if key.is_empty() {
+            return Ok(());
+        }
+
+        // Strict sliding-window-log limiter is checked first. It owns its
+        // own accounting (ring buffer of timestamps per key), so the classic
+        // rate/inflight path below is skipped entirely when it is active.
+        if let Some(strict) = &self.strict_rate {
+            if !strict.try_acquire(&key) {
+                return Err(Error::Exceed {
+                    category: PluginCategory::Limit.to_string(),
+                    max: strict.max as f64,
+                    value: (strict.max as f64) + 1.0,
+                });
+            }
             return Ok(());
         }
 
@@ -624,5 +737,317 @@ interval = "1s"
             .await
             .unwrap();
         assert_eq!(true, result == RequestPluginResult::Continue);
+    }
+
+    // ---- Helpers for strict_rate tests ---------------------------------
+
+    async fn make_session_with_ip(ip: &str) -> Session {
+        let header = format!("X-Forwarded-For: {ip}");
+        let input =
+            format!("GET /vicanso/pingap?size=1 HTTP/1.1\r\n{header}\r\n\r\n");
+        let mock_io = Builder::new().read(input.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        session
+    }
+
+    async fn make_session_with_header(name: &str, val: &str) -> Session {
+        let header = format!("{name}: {val}");
+        let input =
+            format!("GET /vicanso/pingap?size=1 HTTP/1.1\r\n{header}\r\n\r\n");
+        let mock_io = Builder::new().read(input.as_bytes()).build();
+        let mut session = Session::new_h1(Box::new(mock_io));
+        session.read_request().await.unwrap();
+        session
+    }
+
+    fn expect_continue(result: RequestPluginResult) {
+        assert_eq!(
+            true,
+            result == RequestPluginResult::Continue,
+            "expected Continue, got {result:?}"
+        );
+    }
+
+    fn expect_429(result: RequestPluginResult) {
+        let RequestPluginResult::Respond(resp) = result else {
+            panic!("expected Respond(429), got {result:?}");
+        };
+        assert_eq!(StatusCode::TOO_MANY_REQUESTS, resp.status);
+    }
+
+    // ---- strict_rate tests ---------------------------------------------
+
+    /// `max=2, interval=200ms`: два запроса проходят, третий — 429,
+    /// после паузы окно очищается и новый запрос снова проходит.
+    #[tokio::test]
+    async fn test_strict_rate_basic_limit() {
+        let limiter = Limiter::new(
+            &toml::from_str::<PluginConf>(
+                r###"
+type = "strict_rate"
+max = 2
+interval = "200ms"
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(limiter.strict_rate.is_some());
+        assert!(limiter.rate.is_none());
+        assert!(limiter.inflight.is_none());
+        assert_eq!(limiter.max, 2.0);
+
+        let mut session = make_session_with_ip("1.1.1.1").await;
+
+        // 1-й и 2-й — проходят
+        expect_continue(
+            limiter
+                .handle_request(
+                    PluginStep::Request,
+                    &mut session,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+        expect_continue(
+            limiter
+                .handle_request(
+                    PluginStep::Request,
+                    &mut session,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+
+        // 3-й — 429 (окно полно)
+        expect_429(
+            limiter
+                .handle_request(
+                    PluginStep::Request,
+                    &mut session,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+
+        // Подождать чуть больше interval — окно очищается
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        expect_continue(
+            limiter
+                .handle_request(
+                    PluginStep::Request,
+                    &mut session,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+
+    /// Ключевой тест: отклонённые запросы тоже сдвигают окно.
+    /// После 2 ok + 10 rejected клиент не освобождается через половину
+    /// интервала после последнего спам-запроса — только через полный
+    /// interval тишины.
+    #[tokio::test]
+    async fn test_strict_rate_spam_extends_window() {
+        let limiter = Limiter::new(
+            &toml::from_str::<PluginConf>(
+                r###"
+type = "strict_rate"
+max = 2
+interval = "200ms"
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut session = make_session_with_ip("2.2.2.2").await;
+
+        // Фаза 1: 2 принятых
+        for _ in 0..2 {
+            expect_continue(
+                limiter
+                    .handle_request(
+                        PluginStep::Request,
+                        &mut session,
+                        &mut Ctx::default(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        // Фаза 2: 10 отклонённых подряд (спам)
+        for i in 0..10 {
+            let r = limiter
+                .handle_request(
+                    PluginStep::Request,
+                    &mut session,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap();
+            let RequestPluginResult::Respond(resp) = r else {
+                panic!("spam attempt {i} expected 429, got Continue");
+            };
+            assert_eq!(StatusCode::TOO_MANY_REQUESTS, resp.status);
+        }
+
+        // Фаза 3: ~50% interval после последнего rejected —
+        // окно ещё занято последними двумя спам-timestamps.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        expect_429(
+            limiter
+                .handle_request(
+                    PluginStep::Request,
+                    &mut session,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+
+        // Фаза 4: добираем больше одного полного интервала после
+        // самого последнего события (Фаза 3 добавила свежий timestamp),
+        // окно должно очиститься.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        expect_continue(
+            limiter
+                .handle_request(
+                    PluginStep::Request,
+                    &mut session,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+
+    /// Проверяем что tag=header работает наравне с tag=ip и что разные
+    /// значения ключа (разные IP / разные header'ы) имеют независимые
+    /// bucket'ы — один спамер не должен блокировать другого.
+    #[tokio::test]
+    async fn test_strict_rate_tag_variants() {
+        // --- tag = ip: разные IP-ы имеют независимые лимиты ----------
+        let limiter_ip = Limiter::new(
+            &toml::from_str::<PluginConf>(
+                r###"
+type = "strict_rate"
+tag = "ip"
+max = 1
+interval = "500ms"
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(LimitTag::Ip, limiter_ip.tag);
+
+        let mut s_a = make_session_with_ip("10.0.0.1").await;
+        let mut s_b = make_session_with_ip("10.0.0.2").await;
+
+        // IP A: первый проходит, второй — 429
+        expect_continue(
+            limiter_ip
+                .handle_request(
+                    PluginStep::Request,
+                    &mut s_a,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+        expect_429(
+            limiter_ip
+                .handle_request(
+                    PluginStep::Request,
+                    &mut s_a,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+
+        // IP B под тем же лимитером — НЕ затронут спамом от A
+        expect_continue(
+            limiter_ip
+                .handle_request(
+                    PluginStep::Request,
+                    &mut s_b,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+        expect_429(
+            limiter_ip
+                .handle_request(
+                    PluginStep::Request,
+                    &mut s_b,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+
+        // --- tag = header: лимит по значению заголовка X-Api-Key ------
+        let limiter_hdr = Limiter::new(
+            &toml::from_str::<PluginConf>(
+                r###"
+type = "strict_rate"
+tag = "header"
+key = "X-Api-Key"
+max = 1
+interval = "500ms"
+"###,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(LimitTag::RequestHeader, limiter_hdr.tag);
+        assert_eq!("X-Api-Key", limiter_hdr.key);
+
+        let mut s_key1 = make_session_with_header("X-Api-Key", "aaa").await;
+        let mut s_key2 = make_session_with_header("X-Api-Key", "bbb").await;
+
+        expect_continue(
+            limiter_hdr
+                .handle_request(
+                    PluginStep::Request,
+                    &mut s_key1,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+        expect_429(
+            limiter_hdr
+                .handle_request(
+                    PluginStep::Request,
+                    &mut s_key1,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
+
+        // Другое значение API-ключа — независимый bucket
+        expect_continue(
+            limiter_hdr
+                .handle_request(
+                    PluginStep::Request,
+                    &mut s_key2,
+                    &mut Ctx::default(),
+                )
+                .await
+                .unwrap(),
+        );
     }
 }
